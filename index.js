@@ -1,86 +1,116 @@
 import express from "express";
 import Airtable from "airtable";
 import { jwtVerify, createRemoteJWKSet } from "jose";
-import {
-  McpServer,
-} from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  StreamableHTTPServerTransport,
-} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/sdk";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk";
 
+// =======================
+// CONFIG
+// =======================
+const PORT = process.env.PORT || 3000;
+const AIRTABLE_PAT = process.env.AIRTABLE_PAT;
+const OAUTH_ISSUER = `https://${process.env.OAUTH_ISSUER}`;
+const OAUTH_AUDIENCE = process.env.OAUTH_AUDIENCE;
+
+// =======================
+// APP EXPRESS
+// =======================
 const app = express();
 app.use(express.json());
 
-const {
-  AIRTABLE_PAT,
-  OAUTH_ISSUER,
-  OAUTH_AUDIENCE,
-  PORT = 3000,
-} = process.env;
+// =======================
+// AUTH OAUTH (CLAUDE)
+// =======================
+const jwks = createRemoteJWKSet(
+  new URL(`${OAUTH_ISSUER}/.well-known/jwks.json`)
+);
 
-// ===== MCP SERVER =====
-const server = new McpServer({
+async function authenticate(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing token" });
+  }
+
+  try {
+    const token = auth.slice(7);
+    await jwtVerify(token, jwks, {
+      issuer: OAUTH_ISSUER,
+      audience: OAUTH_AUDIENCE,
+    });
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+}
+
+// =======================
+// MCP SERVER
+// =======================
+const mcp = new McpServer({
   name: "airtable-mcp",
   version: "1.0.0",
 });
 
-const airtable = new Airtable({ apiKey: AIRTABLE_PAT });
-
-// 🔓 FULL ACCESS (comme tu l’as demandé)
-server.tool("list_bases", {}, async () => {
-  const res = await fetch("https://api.airtable.com/v0/meta/bases", {
-    headers: { Authorization: `Bearer ${AIRTABLE_PAT}` },
-  });
-  return await res.json();
-});
-
-server.tool("list_records", {
-  inputSchema: {
+// =======================
+// AIRTABLE TOOL
+// =======================
+mcp.tool(
+  "list_airtable_records",
+  {
     baseId: "string",
-    table: "string",
+    tableName: "string",
   },
-}, async ({ baseId, table }) => {
-  const base = airtable.base(baseId);
-  const records = await base(table).select().all();
-  return records.map(r => ({ id: r.id, fields: r.fields }));
-});
+  async ({ baseId, tableName }) => {
+    const base = new Airtable({ apiKey: AIRTABLE_PAT }).base(baseId);
 
-// ===== OAUTH CHECK =====
-const jwks = createRemoteJWKSet(
-  new URL(`https://${OAUTH_ISSUER}/.well-known/jwks.json`)
+    const records = [];
+    await base(tableName)
+      .select({ maxRecords: 20 })
+      .eachPage((page, fetchNext) => {
+        page.forEach((record) => {
+          records.push({
+            id: record.id,
+            fields: record.fields,
+          });
+        });
+        fetchNext();
+      });
+
+    return { records };
+  }
 );
 
-async function auth(req, res, next) {
-  const header = req.headers.authorization;
-  if (!header) return res.sendStatus(401);
+// =======================
+// MCP HTTP ENDPOINT
+// =======================
+const transport = new StreamableHTTPServerTransport({
+  path: "/mcp",
+});
 
-  const token = header.replace("Bearer ", "");
-  await jwtVerify(token, jwks, {
-    issuer: `https://${OAUTH_ISSUER}/`,
-    audience: OAUTH_AUDIENCE,
-  });
+app.post("/mcp", authenticate, async (req, res) => {
+  await transport.handleRequest(req, res, mcp);
+});
 
-  next();
-}
-
-// ===== DISCOVERY ENDPOINT =====
+// =======================
+// DISCOVERY ENDPOINT (OBLIGATOIRE POUR CLAUDE)
+// =======================
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
   res.json({
-    resource: "https://mrtechlab.cloud/mcp",
-    authorization_servers: [`https://${OAUTH_ISSUER}`],
+    resource: "airtable-mcp",
+    authorization_servers: [OAUTH_ISSUER],
   });
 });
 
-// ===== MCP ENDPOINT =====
-app.all("/mcp", auth, async (req, res) => {
-  const transport = new StreamableHTTPServerTransport({
-    request: req,
-    response: res,
-  });
-  await server.connect(transport);
-  await transport.handleRequest();
+// =======================
+// HEALTHCHECK
+// =======================
+app.get("/", (req, res) => {
+  res.send("MCP Airtable is running");
 });
 
+// =======================
+// START SERVER
+// =======================
 app.listen(PORT, () => {
-  console.log("MCP running");
+  console.log(`MCP Airtable running on port ${PORT}`);
 });
