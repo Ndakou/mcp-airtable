@@ -1,8 +1,9 @@
 import express from "express";
 import Airtable from "airtable";
 import { jwtVerify, createRemoteJWKSet } from "jose";
-import { McpServer } from "@modelcontextprotocol/sdk";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk";
+
+import { McpServer } from "@modelcontextprotocol/sdk/server";
+import { HttpServerTransport } from "@modelcontextprotocol/sdk/server/http";
 
 // =======================
 // CONFIG
@@ -13,13 +14,13 @@ const OAUTH_ISSUER = `https://${process.env.OAUTH_ISSUER}`;
 const OAUTH_AUDIENCE = process.env.OAUTH_AUDIENCE;
 
 // =======================
-// APP EXPRESS
+// EXPRESS
 // =======================
 const app = express();
 app.use(express.json());
 
 // =======================
-// AUTH OAUTH (CLAUDE)
+// OAUTH (CLAUDE)
 // =======================
 const jwks = createRemoteJWKSet(
   new URL(`${OAUTH_ISSUER}/.well-known/jwks.json`)
@@ -32,13 +33,12 @@ async function authenticate(req, res, next) {
   }
 
   try {
-    const token = auth.slice(7);
-    await jwtVerify(token, jwks, {
+    await jwtVerify(auth.slice(7), jwks, {
       issuer: OAUTH_ISSUER,
       audience: OAUTH_AUDIENCE,
     });
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
@@ -66,14 +66,11 @@ mcp.tool(
     const records = [];
     await base(tableName)
       .select({ maxRecords: 20 })
-      .eachPage((page, fetchNext) => {
-        page.forEach((record) => {
-          records.push({
-            id: record.id,
-            fields: record.fields,
-          });
-        });
-        fetchNext();
+      .eachPage((page, next) => {
+        page.forEach((r) =>
+          records.push({ id: r.id, fields: r.fields })
+        );
+        next();
       });
 
     return { records };
@@ -81,18 +78,16 @@ mcp.tool(
 );
 
 // =======================
-// MCP HTTP ENDPOINT
+// MCP HTTP
 // =======================
-const transport = new StreamableHTTPServerTransport({
-  path: "/mcp",
-});
+const transport = new HttpServerTransport();
 
 app.post("/mcp", authenticate, async (req, res) => {
   await transport.handleRequest(req, res, mcp);
 });
 
 // =======================
-// DISCOVERY ENDPOINT (OBLIGATOIRE POUR CLAUDE)
+// DISCOVERY (CLAUDE)
 // =======================
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
   res.json({
@@ -102,15 +97,15 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
 });
 
 // =======================
-// HEALTHCHECK
+// HEALTH
 // =======================
 app.get("/", (req, res) => {
-  res.send("MCP Airtable is running");
+  res.send("MCP Airtable running");
 });
 
 // =======================
-// START SERVER
+// START
 // =======================
 app.listen(PORT, () => {
-  console.log(`MCP Airtable running on port ${PORT}`);
+  console.log(`MCP Airtable live on port ${PORT}`);
 });
