@@ -288,35 +288,36 @@ app.get("/mcp-public/sse", async (req, res) => {
   const sessionId = randomUUID();
   console.log("🆔 Session ID:", sessionId);
   
-  const server = createMCPServer();
-  const transport = new SSEServerTransport("/mcp-public/message", res);
-  
-  sessions.set(sessionId, { server, transport });
-  
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "X-Session-Id": sessionId,
-  });
-
   try {
+    // 1. Créer le serveur et le transport
+    const server = createMCPServer();
+    const transport = new SSEServerTransport("/mcp-public/message", res);
+    
+    // 2. Sauvegarder la session
+    sessions.set(sessionId, { server, transport });
+    
+    // 3. Connecter (cela gère les headers SSE automatiquement)
     await server.connect(transport);
     console.log("✅ SSE connected:", sessionId);
+    
+    // 4. Cleanup on close
+    req.on("close", () => {
+      console.log("🔒 SSE closed:", sessionId);
+      sessions.delete(sessionId);
+    });
+    
   } catch (error) {
     console.error("💥 SSE connection error:", error);
     sessions.delete(sessionId);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
   }
-
-  req.on("close", () => {
-    console.log("🔒 SSE closed:", sessionId);
-    sessions.delete(sessionId);
-  });
 });
 
 app.post("/mcp-public/message", async (req, res) => {
   const sessionId = req.header("x-session-id");
-  console.log("📨 Message received for session:", sessionId);
+  console.log("📨 Message for session:", sessionId);
   
   const session = sessions.get(sessionId);
   if (!session) {
@@ -345,25 +346,23 @@ app.get("/mcp/sse", async (req, res) => {
   console.log("📡 Protected SSE connection request");
   
   const sessionId = randomUUID();
-  const server = createMCPServer();
-  const transport = new SSEServerTransport("/mcp/message", res);
   
-  sessions.set(sessionId, { server, transport });
-  
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "X-Session-Id": sessionId,
-  });
+  try {
+    const server = createMCPServer();
+    const transport = new SSEServerTransport("/mcp/message", res);
+    sessions.set(sessionId, { server, transport });
+    
+    await server.connect(transport);
+    console.log("✅ Protected SSE connected:", sessionId);
 
-  await server.connect(transport);
-  console.log("✅ Protected SSE connected:", sessionId);
-
-  req.on("close", () => {
-    console.log("🔒 Protected SSE closed:", sessionId);
+    req.on("close", () => {
+      console.log("🔒 Protected SSE closed:", sessionId);
+      sessions.delete(sessionId);
+    });
+  } catch (error) {
+    console.error("Error:", error);
     sessions.delete(sessionId);
-  });
+  }
 });
 
 app.post("/mcp/message", async (req, res) => {
@@ -417,10 +416,12 @@ app.get("/health", (_, res) => {
 // =======================
 app.use((err, req, res, next) => {
   console.error("💥 Express Error:", err);
-  res.status(500).json({
-    error: "Internal Server Error",
-    message: err.message,
-  });
+  if (!res.headersSent) {
+    res.status(500).json({
+      error: "Internal Server Error",
+      message: err.message,
+    });
+  }
 });
 
 // =======================
