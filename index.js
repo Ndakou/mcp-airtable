@@ -179,30 +179,39 @@ async function handleMcpRequest(req, res, transports) {
     if (!transport) {
       console.log("🔄 No existing transport, checking for initialize request");
       
-      if (!isInitializeRequest(req.body)) {
+      // Si le body est vide ou invalide mais qu'il y a des transports existants
+      if ((!req.body || Object.keys(req.body).length === 0) && transports.size > 0) {
+        console.log("⚠️ Empty body but transports exist, using most recent transport");
+        // Utiliser le transport le plus récent
+        transport = Array.from(transports.values())[transports.size - 1];
+        console.log("♻️ Reusing transport");
+      } else if (!isInitializeRequest(req.body)) {
         console.log("❌ Not an initialize request:", JSON.stringify(req.body));
-        return res.status(400).send("Expected initialize request");
+        return res.status(400).json({
+          error: "Expected initialize request",
+          receivedBody: req.body
+        });
+      } else {
+        console.log("✅ Valid initialize request, creating transport");
+        
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (id) => {
+            console.log("🎯 Session initialized:", id);
+            transports.set(id, transport);
+          },
+          enableDnsRebindingProtection: false, // DÉSACTIVÉ pour compatibilité Claude
+        });
+
+        transport.onclose = () => {
+          console.log("🔒 Transport closed:", transport.sessionId);
+          if (transport.sessionId) transports.delete(transport.sessionId);
+        };
+
+        console.log("🔌 Connecting to MCP server");
+        await mcp.connect(transport);
+        console.log("✅ MCP connected successfully");
       }
-
-      console.log("✅ Valid initialize request, creating transport");
-      
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => {
-          console.log("🎯 Session initialized:", id);
-          transports.set(id, transport);
-        },
-        enableDnsRebindingProtection: true,
-      });
-
-      transport.onclose = () => {
-        console.log("🔒 Transport closed:", transport.sessionId);
-        if (transport.sessionId) transports.delete(transport.sessionId);
-      };
-
-      console.log("🔌 Connecting to MCP server");
-      await mcp.connect(transport);
-      console.log("✅ MCP connected successfully");
     } else {
       console.log("♻️ Using existing transport:", req.header("mcp-session-id"));
     }
@@ -222,7 +231,7 @@ async function handleMcpRequest(req, res, transports) {
     if (!res.headersSent) {
       res.status(500).json({
         error: e?.message || "Server error",
-        details: e?.stack
+        details: process.env.NODE_ENV === 'development' ? e?.stack : undefined
       });
     }
   }
