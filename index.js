@@ -4,6 +4,10 @@ import { jwtVerify, createRemoteJWKSet } from "jose";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { 
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 
 // =======================
@@ -113,12 +117,12 @@ function createMCPServer() {
     }
   );
 
-  // Register tools
-  server.setRequestHandler("tools/list", async () => ({
+  // List tools handler
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       {
         name: "airtable_list_bases",
-        description: "List all Airtable bases",
+        description: "List all Airtable bases accessible with your API key",
         inputSchema: {
           type: "object",
           properties: {},
@@ -126,64 +130,79 @@ function createMCPServer() {
       },
       {
         name: "airtable_list_tables",
-        description: "List tables in a base",
+        description: "List all tables in a specific Airtable base",
         inputSchema: {
           type: "object",
           properties: {
-            baseId: { type: "string", description: "The base ID" },
+            baseId: { 
+              type: "string", 
+              description: "The Airtable base ID (starts with 'app')" 
+            },
           },
           required: ["baseId"],
         },
       },
       {
         name: "airtable_list_records",
-        description: "List records from a table",
+        description: "List records from a table in an Airtable base",
         inputSchema: {
           type: "object",
           properties: {
-            baseId: { type: "string", description: "The base ID" },
-            tableName: { type: "string", description: "The table name" },
-            maxRecords: { type: "number", description: "Max records to return" },
+            baseId: { 
+              type: "string", 
+              description: "The Airtable base ID" 
+            },
+            tableName: { 
+              type: "string", 
+              description: "The name of the table" 
+            },
+            maxRecords: { 
+              type: "number", 
+              description: "Maximum number of records to return (default: 50)" 
+            },
           },
           required: ["baseId", "tableName"],
         },
       },
       {
         name: "airtable_create_record",
-        description: "Create a new record",
+        description: "Create a new record in an Airtable table",
         inputSchema: {
           type: "object",
           properties: {
-            baseId: { type: "string" },
-            tableName: { type: "string" },
-            fields: { type: "object" },
+            baseId: { type: "string", description: "The Airtable base ID" },
+            tableName: { type: "string", description: "The table name" },
+            fields: { 
+              type: "object", 
+              description: "Object with field names as keys and values" 
+            },
           },
           required: ["baseId", "tableName", "fields"],
         },
       },
       {
         name: "airtable_update_record",
-        description: "Update an existing record",
+        description: "Update an existing record in an Airtable table",
         inputSchema: {
           type: "object",
           properties: {
             baseId: { type: "string" },
             tableName: { type: "string" },
-            recordId: { type: "string" },
-            fields: { type: "object" },
+            recordId: { type: "string", description: "The record ID to update" },
+            fields: { type: "object", description: "Fields to update" },
           },
           required: ["baseId", "tableName", "recordId", "fields"],
         },
       },
       {
         name: "airtable_delete_record",
-        description: "Delete a record",
+        description: "Delete a record from an Airtable table",
         inputSchema: {
           type: "object",
           properties: {
             baseId: { type: "string" },
             tableName: { type: "string" },
-            recordId: { type: "string" },
+            recordId: { type: "string", description: "The record ID to delete" },
           },
           required: ["baseId", "tableName", "recordId"],
         },
@@ -191,7 +210,8 @@ function createMCPServer() {
     ],
   }));
 
-  server.setRequestHandler("tools/call", async (request) => {
+  // Call tool handler
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
@@ -228,6 +248,7 @@ function createMCPServer() {
         ],
       };
     } catch (error) {
+      console.error("Tool error:", error);
       return {
         content: [
           {
@@ -265,6 +286,8 @@ app.get("/mcp-public/sse", async (req, res) => {
   console.log("📡 SSE connection request");
   
   const sessionId = randomUUID();
+  console.log("🆔 Session ID:", sessionId);
+  
   const server = createMCPServer();
   const transport = new SSEServerTransport("/mcp-public/message", res);
   
@@ -277,8 +300,13 @@ app.get("/mcp-public/sse", async (req, res) => {
     "X-Session-Id": sessionId,
   });
 
-  await server.connect(transport);
-  console.log("✅ SSE connected:", sessionId);
+  try {
+    await server.connect(transport);
+    console.log("✅ SSE connected:", sessionId);
+  } catch (error) {
+    console.error("💥 SSE connection error:", error);
+    sessions.delete(sessionId);
+  }
 
   req.on("close", () => {
     console.log("🔒 SSE closed:", sessionId);
@@ -301,7 +329,9 @@ app.post("/mcp-public/message", async (req, res) => {
     console.log("✅ Message handled");
   } catch (error) {
     console.error("💥 Error handling message:", error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
@@ -347,7 +377,14 @@ app.post("/mcp/message", async (req, res) => {
     return res.status(404).json({ error: "Session not found" });
   }
 
-  await session.transport.handlePostMessage(req, res);
+  try {
+    await session.transport.handlePostMessage(req, res);
+  } catch (error) {
+    console.error("Error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 });
 
 // =======================
@@ -367,6 +404,25 @@ app.get("/", (_, res) => {
   });
 });
 
+app.get("/health", (_, res) => {
+  res.json({
+    status: "healthy",
+    uptime: process.uptime(),
+    sessions: sessions.size,
+  });
+});
+
+// =======================
+// ERROR HANDLER
+// =======================
+app.use((err, req, res, next) => {
+  console.error("💥 Express Error:", err);
+  res.status(500).json({
+    error: "Internal Server Error",
+    message: err.message,
+  });
+});
+
 // =======================
 // START
 // =======================
@@ -378,6 +434,14 @@ app.listen(PORT, () => {
 ======================================
 📡 Public SSE:     /mcp-public/sse
 🔒 Protected SSE:  /mcp/sse
+❤️  Health:        /health
 ======================================
   `);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received');
+  sessions.clear();
+  process.exit(0);
 });
