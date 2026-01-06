@@ -63,11 +63,14 @@ const airtable = new Airtable({ apiKey: AIRTABLE_PAT });
 
 // List bases
 mcp.tool("airtable_list_bases", {}, async () => {
+  console.log("🔧 Tool called: airtable_list_bases");
   const res = await fetch("https://api.airtable.com/v0/meta/bases", {
     headers: { Authorization: `Bearer ${AIRTABLE_PAT}` },
   });
   if (!res.ok) throw new Error(await res.text());
-  return await res.json();
+  const data = await res.json();
+  console.log("✅ airtable_list_bases completed");
+  return data;
 });
 
 // List tables
@@ -75,12 +78,15 @@ mcp.tool(
   "airtable_list_tables",
   { baseId: "string" },
   async ({ baseId }) => {
+    console.log("🔧 Tool called: airtable_list_tables", { baseId });
     const res = await fetch(
       `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
       { headers: { Authorization: `Bearer ${AIRTABLE_PAT}` } }
     );
     if (!res.ok) throw new Error(await res.text());
-    return await res.json();
+    const data = await res.json();
+    console.log("✅ airtable_list_tables completed");
+    return data;
   }
 );
 
@@ -93,8 +99,10 @@ mcp.tool(
     maxRecords: "number",
   },
   async ({ baseId, tableName, maxRecords = 50 }) => {
+    console.log("🔧 Tool called: airtable_list_records", { baseId, tableName, maxRecords });
     const base = airtable.base(baseId);
     const records = await base(tableName).select({ maxRecords }).all();
+    console.log("✅ airtable_list_records completed");
     return { records: records.map(r => ({ id: r.id, fields: r.fields })) };
   }
 );
@@ -108,8 +116,10 @@ mcp.tool(
     fields: "object",
   },
   async ({ baseId, tableName, fields }) => {
+    console.log("🔧 Tool called: airtable_create_record", { baseId, tableName });
     const base = airtable.base(baseId);
     const rec = await base(tableName).create(fields);
+    console.log("✅ airtable_create_record completed");
     return { id: rec.id, fields: rec.fields };
   }
 );
@@ -124,8 +134,10 @@ mcp.tool(
     fields: "object",
   },
   async ({ baseId, tableName, recordId, fields }) => {
+    console.log("🔧 Tool called: airtable_update_record", { baseId, tableName, recordId });
     const base = airtable.base(baseId);
     const rec = await base(tableName).update(recordId, fields);
+    console.log("✅ airtable_update_record completed");
     return { id: rec.id, fields: rec.fields };
   }
 );
@@ -139,8 +151,10 @@ mcp.tool(
     recordId: "string",
   },
   async ({ baseId, tableName, recordId }) => {
+    console.log("🔧 Tool called: airtable_delete_record", { baseId, tableName, recordId });
     const base = airtable.base(baseId);
     const deleted = await base(tableName).destroy(recordId);
+    console.log("✅ airtable_delete_record completed");
     return { id: deleted.id, deleted: true };
   }
 );
@@ -149,31 +163,68 @@ mcp.tool(
 // HELPER: MCP Request Handler
 // =======================
 async function handleMcpRequest(req, res, transports) {
+  console.log("📥 Request received:", {
+    method: req.method,
+    body: req.body ? JSON.stringify(req.body).substring(0, 200) : 'no body',
+    sessionId: req.header("mcp-session-id"),
+    headers: {
+      'content-type': req.header('content-type'),
+      'user-agent': req.header('user-agent')
+    }
+  });
+
   let transport = transports.get(req.header("mcp-session-id"));
 
   try {
     if (!transport) {
+      console.log("🔄 No existing transport, checking for initialize request");
+      
       if (!isInitializeRequest(req.body)) {
+        console.log("❌ Not an initialize request:", JSON.stringify(req.body));
         return res.status(400).send("Expected initialize request");
       }
 
+      console.log("✅ Valid initialize request, creating transport");
+      
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => transports.set(id, transport),
+        onsessioninitialized: (id) => {
+          console.log("🎯 Session initialized:", id);
+          transports.set(id, transport);
+        },
         enableDnsRebindingProtection: true,
       });
 
       transport.onclose = () => {
+        console.log("🔒 Transport closed:", transport.sessionId);
         if (transport.sessionId) transports.delete(transport.sessionId);
       };
 
+      console.log("🔌 Connecting to MCP server");
       await mcp.connect(transport);
+      console.log("✅ MCP connected successfully");
+    } else {
+      console.log("♻️ Using existing transport:", req.header("mcp-session-id"));
     }
 
+    console.log("🚀 Handling request with transport");
     await transport.handleRequest(req, res);
+    console.log("✅ Request handled successfully");
+    
   } catch (e) {
-    console.error("MCP Error:", e);
-    res.status(500).send(e?.message || "Server error");
+    console.error("💥 MCP Error:", {
+      message: e?.message,
+      stack: e?.stack,
+      name: e?.name,
+      code: e?.code
+    });
+    
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: e?.message || "Server error",
+        details: e?.stack
+      });
+    }
   }
 }
 
@@ -183,6 +234,12 @@ async function handleMcpRequest(req, res, transports) {
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
 // Transports pour chaque endpoint
 const publicTransports = new Map();
 const protectedTransports = new Map();
@@ -190,6 +247,7 @@ const protectedTransports = new Map();
 // 🔑 OAUTH DISCOVERY — CONFORME CLAUDE WEB (optionnel)
 if (OAUTH_ISSUER) {
   app.get("/.well-known/oauth-protected-resource", (req, res) => {
+    console.log("📋 OAuth discovery requested");
     res.json({
       resource: "https://mcp-airtable-wdjk.onrender.com/mcp",
       authorization_servers: [OAUTH_ISSUER]
@@ -201,7 +259,7 @@ if (OAUTH_ISSUER) {
 // MCP ENDPOINT PUBLIC (pour Claude.ai)
 // =======================
 app.all("/mcp-public", async (req, res) => {
-  console.log("📥 MCP Public request received");
+  console.log("📥 MCP Public endpoint hit");
   await handleMcpRequest(req, res, publicTransports);
 });
 
@@ -209,6 +267,7 @@ app.all("/mcp-public", async (req, res) => {
 // MCP ENDPOINT PROTÉGÉ (avec OAuth)
 // =======================
 app.all("/mcp", async (req, res) => {
+  console.log("🔐 MCP Protected endpoint hit");
   const ok = await requireAuth(req);
   if (!ok) {
     console.log("❌ Unauthorized MCP request");
@@ -223,21 +282,41 @@ app.all("/mcp", async (req, res) => {
 // HEALTH CHECK
 // =======================
 app.get("/", (_, res) => {
+  console.log("❤️ Health check");
   res.json({
     status: "OK",
     service: "Airtable MCP Server",
     version: "1.0.0",
+    timestamp: new Date().toISOString(),
     endpoints: {
       public: "/mcp-public (no auth required)",
       protected: "/mcp (OAuth required)",
+    },
+    stats: {
+      publicTransports: publicTransports.size,
+      protectedTransports: protectedTransports.size
     }
   });
 });
 
 app.get("/health", (_, res) => {
+  console.log("🏥 Detailed health check");
   res.json({ 
     status: "healthy",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
+  });
+});
+
+// =======================
+// ERROR HANDLER
+// =======================
+app.use((err, req, res, next) => {
+  console.error("💥 Express Error:", err);
+  res.status(500).json({
+    error: "Internal Server Error",
+    message: err.message
   });
 });
 
@@ -246,8 +325,25 @@ app.get("/health", (_, res) => {
 // =======================
 app.listen(PORT, () => {
   console.log(`
-🚀 MCP Airtable Server running on port ${PORT}
+🚀 ======================================
+   MCP Airtable Server
+   Port: ${PORT}
+   Time: ${new Date().toISOString()}
+======================================
 📍 Public endpoint:    /mcp-public (for Claude.ai)
 🔒 Protected endpoint: /mcp (OAuth required)
+❤️  Health check:      /health
+======================================
   `);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received, closing server...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('👋 SIGINT received, closing server...');
+  process.exit(0);
 });
