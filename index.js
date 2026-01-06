@@ -19,20 +19,22 @@ if (!AIRTABLE_PAT) throw new Error("Missing AIRTABLE_PAT");
 if (!OAUTH_ISSUER_HOST) throw new Error("Missing OAUTH_ISSUER");
 if (!OAUTH_AUDIENCE) throw new Error("Missing OAUTH_AUDIENCE");
 
+// ⚠️ SLASH FINAL OBLIGATOIRE
 const OAUTH_ISSUER = `https://${OAUTH_ISSUER_HOST}/`;
 
 // =======================
-// AUTH (JWT via Auth0 JWKS)
+// AUTH (JWT via Auth0)
 // =======================
-const jwks = createRemoteJWKSet(new URL(`${OAUTH_ISSUER}.well-known/jwks.json`));
+const jwks = createRemoteJWKSet(
+  new URL(`${OAUTH_ISSUER}.well-known/jwks.json`)
+);
 
 async function requireAuth(req) {
   const auth = req.headers.authorization;
   if (!auth?.startsWith("Bearer ")) return false;
 
-  const token = auth.slice("Bearer ".length);
   try {
-    await jwtVerify(token, jwks, {
+    await jwtVerify(auth.slice(7), jwks, {
       issuer: OAUTH_ISSUER,
       audience: OAUTH_AUDIENCE,
     });
@@ -45,35 +47,41 @@ async function requireAuth(req) {
 // =======================
 // MCP SERVER
 // =======================
-const mcp = new McpServer({ name: "airtable-mcp", version: "1.0.0" });
+const mcp = new McpServer({
+  name: "airtable-mcp",
+  version: "1.0.0",
+});
+
 const airtable = new Airtable({ apiKey: AIRTABLE_PAT });
 
-// Tools (tu voulais full accès : bases/tables présentes & futures)
-// 1) list bases
+// =======================
+// TOOLS AIRTABLE
+// =======================
+
+// List bases
 mcp.tool("airtable_list_bases", {}, async () => {
   const res = await fetch("https://api.airtable.com/v0/meta/bases", {
     headers: { Authorization: `Bearer ${AIRTABLE_PAT}` },
   });
-  if (!res.ok) throw new Error(`Airtable error ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(await res.text());
   return await res.json();
 });
 
-// 2) list tables for a base
+// List tables
 mcp.tool(
   "airtable_list_tables",
-  {
-    baseId: "string",
-  },
+  { baseId: "string" },
   async ({ baseId }) => {
-    const res = await fetch(`https://api.airtable.com/v0/meta/bases/${baseId}/tables`, {
-      headers: { Authorization: `Bearer ${AIRTABLE_PAT}` },
-    });
-    if (!res.ok) throw new Error(`Airtable error ${res.status}: ${await res.text()}`);
+    const res = await fetch(
+      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
+      { headers: { Authorization: `Bearer ${AIRTABLE_PAT}` } }
+    );
+    if (!res.ok) throw new Error(await res.text());
     return await res.json();
   }
 );
 
-// 3) list records
+// List records
 mcp.tool(
   "airtable_list_records",
   {
@@ -84,11 +92,11 @@ mcp.tool(
   async ({ baseId, tableName, maxRecords = 50 }) => {
     const base = airtable.base(baseId);
     const records = await base(tableName).select({ maxRecords }).all();
-    return { records: records.map((r) => ({ id: r.id, fields: r.fields })) };
+    return { records: records.map(r => ({ id: r.id, fields: r.fields })) };
   }
 );
 
-// 4) create record
+// Create record
 mcp.tool(
   "airtable_create_record",
   {
@@ -98,12 +106,12 @@ mcp.tool(
   },
   async ({ baseId, tableName, fields }) => {
     const base = airtable.base(baseId);
-    const created = await base(tableName).create(fields);
-    return { id: created.id, fields: created.fields };
+    const rec = await base(tableName).create(fields);
+    return { id: rec.id, fields: rec.fields };
   }
 );
 
-// 5) update record
+// Update record
 mcp.tool(
   "airtable_update_record",
   {
@@ -114,8 +122,8 @@ mcp.tool(
   },
   async ({ baseId, tableName, recordId, fields }) => {
     const base = airtable.base(baseId);
-    const updated = await base(tableName).update(recordId, fields);
-    return { id: updated.id, fields: updated.fields };
+    const rec = await base(tableName).update(recordId, fields);
+    return { id: rec.id, fields: rec.fields };
   }
 );
 
@@ -125,26 +133,26 @@ mcp.tool(
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// OAuth discovery endpoint (Claude web)
+// 🔑 OAUTH DISCOVERY — CONFORME CLAUDE WEB
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
-  const host = req.get("host");
   res.json({
-    resource: `https://${host}/mcp`,
-    authorization_servers: [`https://${OAUTH_ISSUER_HOST}`],
+    resource: "https://mcp-airtable-wdjk.onrender.com/mcp",
+    authorization_servers: [
+      "https://dev-pauyk4xelhthqkfg.eu.auth0.com/"
+    ]
   });
 });
 
-// Streamable HTTP transport needs sessions
+// =======================
+// MCP ENDPOINT
+// =======================
 const transports = new Map();
 
 app.all("/mcp", async (req, res) => {
-  // Auth
   const ok = await requireAuth(req);
   if (!ok) return res.status(401).send("Unauthorized");
 
-  // Session handling
-  const sessionId = req.header("mcp-session-id") || null;
-  let transport = sessionId ? transports.get(sessionId) : null;
+  let transport = transports.get(req.header("mcp-session-id"));
 
   try {
     if (!transport) {
@@ -155,12 +163,11 @@ app.all("/mcp", async (req, res) => {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => transports.set(id, transport),
-        // sécurité DNS rebinding (bon réflexe)
         enableDnsRebindingProtection: true,
       });
 
       transport.onclose = () => {
-        if (transport?.sessionId) transports.delete(transport.sessionId);
+        if (transport.sessionId) transports.delete(transport.sessionId);
       };
 
       await mcp.connect(transport);
@@ -172,6 +179,15 @@ app.all("/mcp", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("OK"));
+// =======================
+// HEALTH
+// =======================
+app.get("/", (_, res) => res.send("OK"));
 
-app.listen(PORT, () => console.log(`MCP running on ${PORT}`));
+// =======================
+// START
+// =======================
+app.listen(PORT, () => {
+  console.log(`MCP running on ${PORT}`);
+});
+
