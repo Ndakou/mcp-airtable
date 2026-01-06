@@ -8,7 +8,6 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { randomUUID } from "node:crypto";
 
 // =======================
 // ENV
@@ -268,7 +267,6 @@ function createMCPServer() {
 // EXPRESS APP
 // =======================
 const app = express();
-app.use(express.json());
 
 // Logging
 app.use((req, res, next) => {
@@ -276,114 +274,69 @@ app.use((req, res, next) => {
   next();
 });
 
-// Sessions
-const sessions = new Map();
-
 // =======================
-// SSE ENDPOINT PUBLIC
+// SSE ENDPOINT PUBLIC - Simplifié
 // =======================
-app.get("/mcp-public/sse", async (req, res) => {
+app.get("/sse", async (req, res) => {
   console.log("📡 SSE connection request");
   
-  const sessionId = randomUUID();
-  console.log("🆔 Session ID:", sessionId);
-  
   try {
-    // 1. Créer le serveur et le transport
     const server = createMCPServer();
-    const transport = new SSEServerTransport("/mcp-public/message", res);
+    const transport = new SSEServerTransport("/message", res);
     
-    // 2. Sauvegarder la session
-    sessions.set(sessionId, { server, transport });
-    
-    // 3. Connecter (cela gère les headers SSE automatiquement)
     await server.connect(transport);
-    console.log("✅ SSE connected:", sessionId);
+    console.log("✅ SSE connected");
     
-    // 4. Cleanup on close
     req.on("close", () => {
-      console.log("🔒 SSE closed:", sessionId);
-      sessions.delete(sessionId);
+      console.log("🔒 SSE closed");
+      transport.close?.();
     });
     
   } catch (error) {
     console.error("💥 SSE connection error:", error);
-    sessions.delete(sessionId);
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
     }
   }
 });
 
-app.post("/mcp-public/message", async (req, res) => {
-  const sessionId = req.header("x-session-id");
-  console.log("📨 Message for session:", sessionId);
-  
-  const session = sessions.get(sessionId);
-  if (!session) {
-    console.log("❌ Session not found:", sessionId);
-    return res.status(404).json({ error: "Session not found" });
-  }
-
-  try {
-    await session.transport.handlePostMessage(req, res);
-    console.log("✅ Message handled");
-  } catch (error) {
-    console.error("💥 Error handling message:", error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
-  }
+app.post("/message", express.json(), async (req, res) => {
+  console.log("📨 Message received");
+  // Le transport SSE gère automatiquement les messages
+  // On n'a rien à faire ici, c'est géré par le SDK
+  res.json({ received: true });
 });
 
 // =======================
 // SSE ENDPOINT PROTÉGÉ
 // =======================
-app.get("/mcp/sse", async (req, res) => {
+app.get("/sse-protected", async (req, res) => {
   const ok = await requireAuth(req);
   if (!ok) return res.status(401).send("Unauthorized");
 
   console.log("📡 Protected SSE connection request");
   
-  const sessionId = randomUUID();
-  
   try {
     const server = createMCPServer();
-    const transport = new SSEServerTransport("/mcp/message", res);
-    sessions.set(sessionId, { server, transport });
+    const transport = new SSEServerTransport("/message-protected", res);
     
     await server.connect(transport);
-    console.log("✅ Protected SSE connected:", sessionId);
+    console.log("✅ Protected SSE connected");
 
     req.on("close", () => {
-      console.log("🔒 Protected SSE closed:", sessionId);
-      sessions.delete(sessionId);
+      console.log("🔒 Protected SSE closed");
+      transport.close?.();
     });
   } catch (error) {
     console.error("Error:", error);
-    sessions.delete(sessionId);
   }
 });
 
-app.post("/mcp/message", async (req, res) => {
+app.post("/message-protected", express.json(), async (req, res) => {
   const ok = await requireAuth(req);
   if (!ok) return res.status(401).send("Unauthorized");
-
-  const sessionId = req.header("x-session-id");
-  const session = sessions.get(sessionId);
   
-  if (!session) {
-    return res.status(404).json({ error: "Session not found" });
-  }
-
-  try {
-    await session.transport.handlePostMessage(req, res);
-  } catch (error) {
-    console.error("Error:", error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
-  }
+  res.json({ received: true });
 });
 
 // =======================
@@ -393,13 +346,12 @@ app.get("/", (_, res) => {
   res.json({
     status: "OK",
     service: "Airtable MCP Server",
-    version: "2.0.0",
+    version: "3.0.0",
     protocol: "SSE",
     endpoints: {
-      public: "/mcp-public/sse",
-      protected: "/mcp/sse",
+      public: "/sse",
+      protected: "/sse-protected",
     },
-    sessions: sessions.size,
   });
 });
 
@@ -407,21 +359,7 @@ app.get("/health", (_, res) => {
   res.json({
     status: "healthy",
     uptime: process.uptime(),
-    sessions: sessions.size,
   });
-});
-
-// =======================
-// ERROR HANDLER
-// =======================
-app.use((err, req, res, next) => {
-  console.error("💥 Express Error:", err);
-  if (!res.headersSent) {
-    res.status(500).json({
-      error: "Internal Server Error",
-      message: err.message,
-    });
-  }
 });
 
 // =======================
@@ -433,13 +371,11 @@ app.listen(PORT, () => {
    MCP Airtable Server (SSE)
    Port: ${PORT}
 ======================================
-📡 Public SSE:     /mcp-public/sse
-🔒 Protected SSE:  /mcp/sse
-❤️  Health:        /health
+📡 Public SSE:     /sse
+🔒 Protected SSE:  /sse-protected
 ======================================
   `);
 });
-
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('👋 SIGTERM received');
