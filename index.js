@@ -171,6 +171,12 @@ app.post("/mcp", async (req, res) => {
         };
         break;
         
+      case "notifications/initialized":
+        // Claude envoie cette notification après l'initialisation
+        // Pas besoin de réponse, juste un accusé de réception
+        console.log("✅ Client initialized");
+        return res.json({ jsonrpc: "2.0", id, result: {} });
+        
       case "tools/list":
         result = { tools };
         break;
