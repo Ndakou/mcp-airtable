@@ -109,7 +109,7 @@ const transports = new Map();
 // =======================
 
 /**
- * OAuth discovery (Claude Web)
+ * OAuth discovery (Claude Web lit ça, mais n’envoie pas de token)
  */
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
   res.json({
@@ -122,27 +122,21 @@ app.get("/.well-known/oauth-protected-resource", (req, res) => {
  * MCP endpoint
  */
 app.all("/mcp", async (req, res) => {
+  const sessionId = req.header("mcp-session-id") || null;
+
   console.log("📥 MCP request:", {
     method: req.method,
-    sessionId: req.header("mcp-session-id") || null,
-    hasAuth: Boolean(req.headers.authorization),
+    sessionId,
+    hasAuth: Boolean(req.headers.authorization), // chez toi: false (normal)
+    ua: (req.headers["user-agent"] || "").slice(0, 80),
+    origin: req.headers.origin || null,
+    referer: req.headers.referer || null,
   });
 
-  // ✅ (1) OAuth challenge obligatoire si pas de token
-  const auth = req.headers.authorization || "";
-  if (!auth.startsWith("Bearer ")) {
-    res.set(
-      "WWW-Authenticate",
-      `Bearer realm="mcp", resource_metadata="${BASE_URL}/.well-known/oauth-protected-resource"`
-    );
-    return res.status(401).send("Unauthorized");
-  }
-
-  const sessionId = req.header("mcp-session-id") || null;
   let transport = sessionId ? transports.get(sessionId) : null;
 
   try {
-    // ✅ (2) plus de fallback "dernier transport"
+    // Si pas de transport: on accepte UNIQUEMENT initialize
     if (!transport) {
       if (!isInitializeRequest(req.body)) {
         return res.status(400).send("Expected initialize request");
@@ -156,7 +150,6 @@ app.all("/mcp", async (req, res) => {
           console.log("🎯 Session initialized:", id);
           transports.set(id, transport);
         },
-        // ✅ (3) protection DNS rebinding : on laisse activé
         enableDnsRebindingProtection: true,
       });
 
