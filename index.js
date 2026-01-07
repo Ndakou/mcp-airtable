@@ -6,7 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { randomUUID } from "node:crypto";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 const PORT = process.env.PORT || 10000;
 const BASE_URL = "https://mcp-airtable-wdjk.onrender.com";
@@ -41,44 +41,32 @@ mcp.tool("airtable_list_bases", {}, async () => {
 });
 
 // List tables
-mcp.tool(
-  "airtable_list_tables",
-  { baseId: "string" },
-  async ({ baseId }) => {
-    console.log("🔧 Tool: airtable_list_tables", { baseId });
-    const res = await fetch(
-      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
-      { headers: { Authorization: `Bearer ${AIRTABLE_PAT}` } }
-    );
-    if (!res.ok) throw new Error(await res.text());
-    return await res.json();
-  }
-);
+mcp.tool("airtable_list_tables", { baseId: "string" }, async ({ baseId }) => {
+  console.log("🔧 Tool: airtable_list_tables", { baseId });
+  const res = await fetch(
+    `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
+    { headers: { Authorization: `Bearer ${AIRTABLE_PAT}` } }
+  );
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json();
+});
 
 // List records
 mcp.tool(
   "airtable_list_records",
-  {
-    baseId: "string",
-    tableName: "string",
-    maxRecords: "number",
-  },
+  { baseId: "string", tableName: "string", maxRecords: "number" },
   async ({ baseId, tableName, maxRecords = 50 }) => {
     console.log("🔧 Tool: airtable_list_records", { baseId, tableName, maxRecords });
     const base = airtable.base(baseId);
     const records = await base(tableName).select({ maxRecords }).all();
-    return { records: records.map(r => ({ id: r.id, fields: r.fields })) };
+    return { records: records.map((r) => ({ id: r.id, fields: r.fields })) };
   }
 );
 
 // Create record
 mcp.tool(
   "airtable_create_record",
-  {
-    baseId: "string",
-    tableName: "string",
-    fields: "object",
-  },
+  { baseId: "string", tableName: "string", fields: "object" },
   async ({ baseId, tableName, fields }) => {
     console.log("🔧 Tool: airtable_create_record", { baseId, tableName });
     const base = airtable.base(baseId);
@@ -90,12 +78,7 @@ mcp.tool(
 // Update record
 mcp.tool(
   "airtable_update_record",
-  {
-    baseId: "string",
-    tableName: "string",
-    recordId: "string",
-    fields: "object",
-  },
+  { baseId: "string", tableName: "string", recordId: "string", fields: "object" },
   async ({ baseId, tableName, recordId, fields }) => {
     console.log("🔧 Tool: airtable_update_record", { baseId, tableName, recordId });
     const base = airtable.base(baseId);
@@ -107,11 +90,7 @@ mcp.tool(
 // Delete record
 mcp.tool(
   "airtable_delete_record",
-  {
-    baseId: "string",
-    tableName: "string",
-    recordId: "string",
-  },
+  { baseId: "string", tableName: "string", recordId: "string" },
   async ({ baseId, tableName, recordId }) => {
     console.log("🔧 Tool: airtable_delete_record", { baseId, tableName, recordId });
     const base = airtable.base(baseId);
@@ -121,7 +100,7 @@ mcp.tool(
 );
 
 // =======================
-// TRANSPORT MANAGEMENT
+// TRANSPORTS
 // =======================
 const transports = new Map();
 
@@ -130,47 +109,55 @@ const transports = new Map();
 // =======================
 
 /**
- * OAuth discovery (OBLIGATOIRE pour Claude Web)
+ * OAuth discovery (Claude Web)
  */
 app.get("/.well-known/oauth-protected-resource", (req, res) => {
   res.json({
     resource: `${BASE_URL}/mcp`,
-    authorization_servers: [
-      "https://dev-pauyk4xelhthqkfg.eu.auth0.com/"
-    ]
+    authorization_servers: ["https://dev-pauyk4xelhthqkfg.eu.auth0.com/"],
   });
 });
 
 /**
- * MCP HTTP endpoint
+ * MCP endpoint
  */
 app.all("/mcp", async (req, res) => {
   console.log("📥 MCP request:", {
     method: req.method,
-    body: req.body ? JSON.stringify(req.body).substring(0, 200) : 'no body',
-    sessionId: req.header("mcp-session-id")
+    sessionId: req.header("mcp-session-id") || null,
+    hasAuth: Boolean(req.headers.authorization),
   });
 
-  let transport = transports.get(req.header("mcp-session-id"));
+  // ✅ (1) OAuth challenge obligatoire si pas de token
+  const auth = req.headers.authorization || "";
+  if (!auth.startsWith("Bearer ")) {
+    res.set(
+      "WWW-Authenticate",
+      `Bearer realm="mcp", resource_metadata="${BASE_URL}/.well-known/oauth-protected-resource"`
+    );
+    return res.status(401).send("Unauthorized");
+  }
+
+  const sessionId = req.header("mcp-session-id") || null;
+  let transport = sessionId ? transports.get(sessionId) : null;
 
   try {
+    // ✅ (2) plus de fallback "dernier transport"
     if (!transport) {
-      console.log("🔄 No existing transport");
-      
       if (!isInitializeRequest(req.body)) {
-        console.log("❌ Not an initialize request");
         return res.status(400).send("Expected initialize request");
       }
 
       console.log("✅ Valid initialize request, creating transport");
-      
+
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
           console.log("🎯 Session initialized:", id);
           transports.set(id, transport);
         },
-        enableDnsRebindingProtection: false,
+        // ✅ (3) protection DNS rebinding : on laisse activé
+        enableDnsRebindingProtection: true,
       });
 
       transport.onclose = () => {
@@ -181,25 +168,12 @@ app.all("/mcp", async (req, res) => {
       console.log("🔌 Connecting to MCP server");
       await mcp.connect(transport);
       console.log("✅ MCP connected successfully");
-    } else {
-      console.log("♻️ Using existing transport:", req.header("mcp-session-id"));
     }
 
-    console.log("🚀 Handling request");
     await transport.handleRequest(req, res);
-    console.log("✅ Request handled successfully");
-    
   } catch (e) {
-    console.error("💥 MCP Error:", {
-      message: e?.message,
-      stack: e?.stack,
-    });
-    
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: e?.message || "Server error"
-      });
-    }
+    console.error("💥 MCP Error:", { message: e?.message, stack: e?.stack });
+    if (!res.headersSent) res.status(500).json({ error: e?.message || "Server error" });
   }
 });
 
@@ -211,10 +185,7 @@ app.get("/", (req, res) => {
     status: "OK",
     service: "Airtable MCP Server",
     version: "1.0.0",
-    protocol: "HTTP",
-    endpoints: {
-      mcp: "/mcp",
-    },
+    endpoints: { mcp: "/mcp" },
     activeSessions: transports.size,
   });
 });
@@ -233,7 +204,7 @@ app.get("/health", (req, res) => {
 app.listen(PORT, () => {
   console.log(`
 🚀 ======================================
-   MCP Airtable Server (HTTP)
+   MCP Airtable Server
    Port: ${PORT}
 ======================================
 📡 MCP endpoint: /mcp
@@ -242,10 +213,10 @@ app.listen(PORT, () => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('👋 SIGTERM received');
+process.on("SIGTERM", () => {
+  console.log("👋 SIGTERM received");
   transports.forEach((t, id) => {
-    console.log('Closing transport:', id);
+    console.log("Closing transport:", id);
     t.close?.();
   });
   transports.clear();
